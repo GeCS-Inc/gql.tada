@@ -41,6 +41,8 @@ interface AbstractSetupSchema {
   introspection: IntrospectionLikeInput;
   scalars?: ScalarsLike;
   disableMasking?: boolean;
+  documentExtension?: Record<string, any>;
+  isObjectFieldsNullable?: boolean;
 }
 
 /** Abstract type for internal configuration
@@ -48,6 +50,8 @@ interface AbstractSetupSchema {
  */
 interface AbstractConfig {
   isMaskingDisabled: boolean;
+  documentExtension: Record<string, any> | undefined;
+  isObjectFieldsNullable: boolean | undefined;
 }
 
 /** This is used to configure gql.tada with your introspection data and scalars.
@@ -91,6 +95,9 @@ interface AbstractSetupCache {
 }
 
 interface setupCache extends AbstractSetupCache {}
+
+type WithDocumentExtension<T, Extension extends Record<string, any> | undefined> =
+  Extension extends Record<string, any> ? T & Extension : T;
 
 interface GraphQLTadaAPI<Schema extends SchemaLike, Config extends AbstractConfig> {
   /** In "multi-schema" mode this identifies the schema.
@@ -139,21 +146,26 @@ interface GraphQLTadaAPI<Schema extends SchemaLike, Config extends AbstractConfi
   <const In extends string, const Fragments extends readonly FragmentShape[]>(
     input: In,
     fragments?: Fragments
-  ): setupCache[In] extends DocumentNodeLike
-    ? unknown extends setupCache['__cacheDisabled']
-      ? setupCache[In]
+  ): WithDocumentExtension<
+    setupCache[In] extends DocumentNodeLike
+      ? unknown extends setupCache['__cacheDisabled']
+        ? setupCache[In]
+        : getDocumentNode<
+            parseDocument<In>,
+            Schema,
+            getFragmentsOfDocuments<Fragments>,
+            Config['isMaskingDisabled'],
+            Config['isObjectFieldsNullable']
+          >
       : getDocumentNode<
           parseDocument<In>,
           Schema,
           getFragmentsOfDocuments<Fragments>,
-          Config['isMaskingDisabled']
-        >
-    : getDocumentNode<
-        parseDocument<In>,
-        Schema,
-        getFragmentsOfDocuments<Fragments>,
-        Config['isMaskingDisabled']
-      >;
+          Config['isMaskingDisabled'],
+          Config['isObjectFieldsNullable']
+        >,
+    Config['documentExtension']
+  >;
 
   /** Function to validate the type of a given scalar or enum value.
    *
@@ -258,6 +270,8 @@ type schemaOfSetup<Setup extends AbstractSetupSchema> = addIntrospectionScalars<
 
 type configOfSetup<Setup extends AbstractSetupSchema> = {
   isMaskingDisabled: Setup['disableMasking'] extends true ? true : false;
+  documentExtension: Setup['documentExtension'];
+  isObjectFieldsNullable: Setup['isObjectFieldsNullable'];
 };
 
 /** Utility to type-instantiate a `graphql` document function with.
@@ -399,16 +413,48 @@ function parse<const In extends string>(input: In): parseDocument<In> {
   return _parse(input) as any;
 }
 
+type WithObjectFieldsNullable<
+  T,
+  isObjectFieldsNullable extends boolean | undefined,
+> = isObjectFieldsNullable extends true ? MakeObjectFieldsNullable<T> : T;
+
+/**
+ * 配列の場合は要素を処理して配列へ、
+ * オブジェクトの場合はプロパティに再帰 + オブジェクトは null を許容、
+ * ただし「配列自身は null にしない」。
+ */
+type MakeObjectFieldsNullable<T> =
+  // 1. 配列なら要素を再帰的に処理（配列自体や要素自体には | null を付けない）
+  T extends (infer U)[]
+    ? MakeObjectFieldsNullable<U>[]
+    : // 2. オブジェクトなら、各プロパティを処理:
+      //    - プロパティが配列なら再帰（要素には | null を付けない）
+      //    - プロパティがオブジェクトなら再帰的に | null を付与
+      //    - プリミティブ型ならそのまま
+      T extends object
+      ? {
+          [K in keyof T]: T[K] extends (infer E)[]
+            ? MakeObjectFieldsNullable<E>[] // プロパティが配列 ⇒ 要素を再帰処理
+            : T[K] extends object
+              ? MakeObjectFieldsNullable<T[K]> | null // プロパティがオブジェクト ⇒ | null を付ける
+              : T[K]; // プリミティブ ⇒ そのまま
+        }
+      : T;
+
 export type getDocumentNode<
   Document extends DocumentNodeLike,
   Introspection extends SchemaLike,
   Fragments extends { [name: string]: any } = {},
   isMaskingDisabled = false,
+  isObjectFieldsNullable extends boolean | undefined = false,
 > =
   getDocumentType<Document, Introspection, Fragments> extends never
     ? never
     : TadaDocumentNode<
-        getDocumentType<Document, Introspection, Fragments>,
+        WithObjectFieldsNullable<
+          getDocumentType<Document, Introspection, Fragments>,
+          isObjectFieldsNullable
+        >,
         getVariablesType<Document, Introspection>,
         decorateFragmentDef<Document, isMaskingDisabled>
       >;
